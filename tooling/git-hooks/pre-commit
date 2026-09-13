@@ -1,0 +1,87 @@
+#!/bin/sh
+# ObiLabs hygiene pre-commit hook.
+# Blocks: personal webmail commit identity, secrets / user-home paths / denylisted
+# strings in added lines, and credential-shaped filenames. Then runs the repo's own
+# pre-commit hook, if any.
+# Canonical source: obilabs/.github, tooling/git-hooks/.
+
+HYG_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+if [ ! -f "$HYG_DIR/hygiene-lib.sh" ]; then
+  echo "hygiene: hygiene-lib.sh is missing next to $0; reinstall the hooks (tooling/git-hooks/install.sh)." >&2
+  exit 1
+fi
+. "$HYG_DIR/hygiene-lib.sh"
+
+hyg_precommit() {
+  _fail=0
+
+  # 1. Commit identity (git var resolves env overrides and config).
+  for _who in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
+    _email=$(git var "$_who" 2>/dev/null | sed -n 's/.*<\(.*\)>.*/\1/p')
+    if [ -n "$_email" ] && hyg_is_personal_email "$_email"; then
+      hyg_err "hygiene: $_who uses a personal webmail address ($_email)."
+      hyg_err "  Use your GitHub noreply address instead, e.g.:"
+      hyg_err "    git config user.email \"<id>+<username>@users.noreply.github.com\""
+      _fail=1
+      break
+    fi
+  done
+
+  # 2. Credential-shaped filenames being added or modified.
+  _badfiles=$(git diff --cached --name-only --diff-filter=ACMR | while IFS= read -r _f; do
+    _base=${_f##*/}
+    case $_base in
+      .env.example | .env.sample | env.example) continue ;;
+      .env | .env.* | *.pem | *.p12 | *service-account*.json | credentials.json)
+        printf '  %s\n' "$_f" ;;
+    esac
+  done)
+  if [ -n "$_badfiles" ]; then
+    hyg_err "hygiene: refusing to commit credential-shaped files:"
+    hyg_err "$_badfiles"
+    hyg_err "  Unstage them (git restore --staged <file>) and add them to .gitignore."
+    hyg_err "  Committed templates should be named .env.example or .env.sample."
+    _fail=1
+  fi
+
+  # 3. Added lines: secrets, user-home absolute paths, denylist entries.
+  _tmp=$(mktemp -d 2>/dev/null || mktemp -d -t hygiene)
+  git diff --cached -U0 --no-color --no-ext-diff | hyg_split_added_lines "$_tmp/added"
+
+  _hit=0
+  if ! hyg_scan_rules "$_tmp/added" hyg_secret_rules 2>"$_tmp/secrets"; then
+    hyg_err "hygiene: possible secrets in staged changes:"
+    cat "$_tmp/secrets" >&2
+    _hit=1
+  fi
+  if ! hyg_scan_rules "$_tmp/added" hyg_path_rules 2>"$_tmp/paths"; then
+    hyg_err "hygiene: absolute user-home paths in staged changes (they break portability and leak usernames):"
+    cat "$_tmp/paths" >&2
+    _hit=1
+  fi
+  if ! hyg_scan_denylist "$_tmp/added" 2>"$_tmp/deny"; then
+    hyg_err "hygiene: entries from your local denylist ($(hyg_denylist_file)) in staged changes:"
+    cat "$_tmp/deny" >&2
+    _hit=1
+  fi
+  rm -rf "$_tmp"
+
+  if [ "$_hit" -eq 1 ]; then
+    hyg_err ""
+    hyg_err "  If a hit is a false positive or a deliberate fake (test fixture), append"
+    hyg_err "  the marker 'hygiene:allow' in a comment on that same line and re-stage."
+    hyg_err "  Last resort for the whole commit: OBILABS_HYGIENE_SKIP=1 git commit ..."
+    _fail=1
+  fi
+
+  return $_fail
+}
+
+if hyg_skip_requested; then
+  hyg_warn_skip pre-commit
+elif ! hyg_precommit; then
+  hyg_err "hygiene: commit blocked."
+  exit 1
+fi
+
+hyg_chain pre-commit "$@"

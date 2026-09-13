@@ -1,0 +1,6 @@
+{
+  "name": "ObiLabs Hygiene",
+  "description": "Leak prevention on every PR and push: gitleaks secret scan, commit identity and AI co-author trailer check, and absolute user-home path check.",
+  "categories": ["Security"],
+  "filePatterns": [".*"]
+}
