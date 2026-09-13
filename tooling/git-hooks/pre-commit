@@ -12,6 +12,20 @@ if [ ! -f "$HYG_DIR/hygiene-lib.sh" ]; then
 fi
 . "$HYG_DIR/hygiene-lib.sh"
 
+# Reads staged paths on stdin and prints the credential-shaped ones. Kept out of
+# $(...) because bash 3.2 (macOS /bin/sh) misparses case patterns inside it.
+hyg_credential_filenames() {
+  while IFS= read -r _f; do
+    _base=${_f##*/}
+    case $_base in
+      .env.example | .env.sample | env.example) ;;
+      .env | .env.* | *.pem | *.p12 | *service-account*.json | credentials.json)
+        printf '  %s\n' "$_f"
+        ;;
+    esac
+  done
+}
+
 hyg_precommit() {
   _fail=0
 
@@ -28,14 +42,7 @@ hyg_precommit() {
   done
 
   # 2. Credential-shaped filenames being added or modified.
-  _badfiles=$(git diff --cached --name-only --diff-filter=ACMR | while IFS= read -r _f; do
-    _base=${_f##*/}
-    case $_base in
-      .env.example | .env.sample | env.example) continue ;;
-      .env | .env.* | *.pem | *.p12 | *service-account*.json | credentials.json)
-        printf '  %s\n' "$_f" ;;
-    esac
-  done)
+  _badfiles=$(git diff --cached --name-only --diff-filter=ACMR | hyg_credential_filenames)
   if [ -n "$_badfiles" ]; then
     hyg_err "hygiene: refusing to commit credential-shaped files:"
     hyg_err "$_badfiles"
