@@ -1,0 +1,39 @@
+#!/bin/sh
+# ObiLabs hygiene commit-msg hook.
+# Strips AI co-author trailers and "Generated with ... Claude Code" lines from the
+# message, trims trailing blank lines, then runs the repo's own commit-msg hook.
+# The stripping itself never fails a commit.
+# Canonical source: obilabs/.github, tooling/git-hooks/.
+
+msg_file=$1
+
+if [ -n "$msg_file" ] && [ -f "$msg_file" ]; then
+  tmp="$msg_file.hygiene.$$"
+  if awk '
+    {
+      l = tolower($0)
+      if (l ~ /^co-authored-by:.*(claude|anthropic)/) next
+      if (l ~ /generated with .*claude code/) next
+      if ($0 ~ /^[ \t\r]*$/) { blank = blank $0 "\n"; next }
+      printf "%s", blank
+      blank = ""
+      print
+    }' "$msg_file" >"$tmp" 2>/dev/null; then
+    if ! cmp -s "$msg_file" "$tmp"; then
+      if grep -iqE '^co-authored-by:.*(claude|anthropic)|generated with .*claude code' "$msg_file"; then
+        echo "hygiene: removed AI co-author/attribution lines from the commit message." >&2
+      fi
+      cat "$tmp" >"$msg_file"
+    fi
+  fi
+  rm -f "$tmp"
+fi
+
+HYG_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+if [ ! -f "$HYG_DIR/hygiene-lib.sh" ]; then
+  echo "hygiene: hygiene-lib.sh is missing next to $0; repo commit-msg hook not chained." >&2
+  exit 0
+fi
+. "$HYG_DIR/hygiene-lib.sh"
+
+hyg_chain commit-msg "$@"

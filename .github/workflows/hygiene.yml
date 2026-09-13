@@ -1,0 +1,165 @@
+# Reusable repository hygiene checks for ObiLabs repositories.
+#
+# Call it from a repo workflow on pull_request and push:
+#   jobs:
+#     hygiene:
+#       uses: obilabs/.github/.github/workflows/hygiene.yml@main
+#
+# Scans only the commits introduced by the PR or push:
+#   1. gitleaks secret scan (honours a repo .gitleaks.toml)
+#   2. commit identity + AI co-author trailer check
+#   3. absolute user-home paths in added lines (mirrors tooling/git-hooks)
+name: Hygiene (reusable)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: Leak prevention
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve commit range
+        id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -eu
+          empty_tree=$(git hash-object -t tree /dev/null)
+          head=$HEAD_SHA
+          base=""
+          case $EVENT_NAME in
+            pull_request | pull_request_target)
+              head=$PR_HEAD
+              base=$(git merge-base "$PR_BASE" "$PR_HEAD")
+              ;;
+            *)
+              if printf '%s' "$PUSH_BEFORE" | grep -Eq '[1-9a-f]' && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null; then
+                base=$PUSH_BEFORE
+              elif git rev-parse -q --verify "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null; then
+                mb=$(git merge-base "refs/remotes/origin/$DEFAULT_BRANCH" "$head" || true)
+                if [ -n "$mb" ] && [ "$mb" != "$head" ]; then base=$mb; fi
+              fi
+              ;;
+          esac
+          if [ -n "$base" ]; then
+            log_range="$base..$head"
+            diff_base=$base
+          else
+            # New repository or unrelated history: scan everything reachable.
+            log_range=$head
+            diff_base=$empty_tree
+          fi
+          echo "Scanning log range: $log_range"
+          {
+            echo "log_range=$log_range"
+            echo "diff_base=$diff_base"
+            echo "head=$head"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Secret scan (gitleaks)
+        env:
+          LOG_RANGE: ${{ steps.range.outputs.log_range }}
+        run: |
+          set -eu
+          # Fail closed: an unresolvable range must not look like a clean scan.
+          echo "Commits in range: $(git rev-list --count $LOG_RANGE)"
+          set -- git /repo --redact --verbose --no-banner --no-color --exit-code 1 "--log-opts=$LOG_RANGE"
+          if [ -f .gitleaks.toml ]; then
+            echo "Using repository .gitleaks.toml"
+            set -- "$@" --config /repo/.gitleaks.toml
+          fi
+          log=$(mktemp)
+          rc=0
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" "$GITLEAKS_IMAGE" "$@" >"$log" 2>&1 || rc=$?
+          cat "$log"
+          if [ "$rc" -eq 0 ] && grep -q ' ERR ' "$log"; then
+            echo "::error title=gitleaks scan error::gitleaks reported an error; the scan cannot be trusted"
+            rc=2
+          fi
+          exit "$rc"
+
+      - name: Commit identity and AI trailer check
+        if: ${{ !cancelled() }}
+        env:
+          LOG_RANGE: ${{ steps.range.outputs.log_range }}
+        run: |
+          set -eu
+          fail=0
+          bad_ids=$(git log --format='%h%x09%ae%x09%ce' $LOG_RANGE | awk -F'\t' '
+            tolower($2) ~ /@(gmail|googlemail)\.com$/ || tolower($3) ~ /@(gmail|googlemail)\.com$/ { print }')
+          if [ -n "$bad_ids" ]; then
+            printf '%s\n' "$bad_ids" | while IFS="$(printf '\t')" read -r sha ae ce; do
+              echo "::error title=Personal webmail identity::commit $sha author=$ae committer=$ce - use a GitHub noreply address"
+            done
+            fail=1
+          fi
+          bad_msgs=$(git log --format='%x01%h%n%B' $LOG_RANGE | awk '
+            substr($0, 1, 1) == "\001" { h = substr($0, 2); next }
+            {
+              l = tolower($0)
+              if ((l ~ /^co-authored-by:.*(claude|anthropic)/ || l ~ /generated with .*claude code/) && !(h in seen)) { seen[h] = 1; print h }
+            }')
+          if [ -n "$bad_msgs" ]; then
+            for sha in $bad_msgs; do
+              echo "::error title=AI co-author trailer::commit $sha carries an AI co-author/attribution line - AI use is disclosed once in the README instead"
+            done
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] && echo "Commit identities and messages are clean."
+          exit "$fail"
+
+      - name: Absolute user-home path check
+        if: ${{ !cancelled() }}
+        env:
+          DIFF_BASE: ${{ steps.range.outputs.diff_base }}
+          HEAD_SHA: ${{ steps.range.outputs.head }}
+        run: |
+          set -eu
+          tmp=$(mktemp -d)
+          # Keep this block identical to hyg_path_rules in tooling/git-hooks/hygiene-lib.sh
+          # (tooling/git-hooks/test/run.sh fails if they drift).
+          cat >"$tmp/rules" <<'EOF'
+          # BEGIN path-rules
+          windows-user-home [A-Za-z]:[\/]Users[\/]
+          macos-user-home (^|[^A-Za-z0-9._-])/Users/[^ /]+/
+          linux-user-home (^|[^A-Za-z0-9._-])/home/[^ /]+/
+          # END path-rules
+          EOF
+          git diff --no-color --no-ext-diff -U0 "$DIFF_BASE" "$HEAD_SHA" | awk -v loc="$tmp/loc" -v txt="$tmp/txt" '
+            BEGIN { printf "" > loc; printf "" > txt }
+            /^diff --git / { hdr = 1; file = ""; next }
+            hdr && /^\+\+\+ / { f = substr($0, 5); if (substr(f, 1, 2) == "b/") f = substr(f, 3); file = f; next }
+            /^@@ / { hdr = 0; s = $0; sub(/^@@ -[0-9,]* \+/, "", s); sub(/[ ,].*$/, "", s); ln = s + 0; next }
+            hdr { next }
+            /^\+/ { c = substr($0, 2); if (index(c, "hygiene:allow") == 0) { print file ":" ln > loc; print c > txt } ln++; next }
+          '
+          fail=0
+          sed 's/^[[:space:]]*//' "$tmp/rules" | while IFS=' ' read -r label re; do
+            case $label in '' | '#'*) continue ;; esac
+            for n in $(grep -n -E -e "$re" "$tmp/txt" | cut -d: -f1); do
+              where=$(sed -n "${n}p" "$tmp/loc")
+              echo "::error file=${where%%:*},line=${where##*:},title=Absolute user-home path::[$label] absolute paths break portability and leak usernames (add hygiene:allow on the line if intentional)"
+              echo hit >>"$tmp/hits"
+            done
+          done
+          if [ -s "$tmp/hits" ]; then fail=1; else echo "No absolute user-home paths in added lines."; fi
+          rm -rf "$tmp"
+          exit "$fail"

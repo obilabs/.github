@@ -1,0 +1,13 @@
+name: Hygiene
+
+on:
+  pull_request:
+  push:
+    branches: [$default-branch]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    uses: obilabs/.github/.github/workflows/hygiene.yml@main
