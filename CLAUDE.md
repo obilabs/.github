@@ -15,8 +15,12 @@ layers that enforce it.
   in the hooks and in the reusable workflow are duplicated by necessity;
   `tooling/git-hooks/test/run.sh` fails if the two blocks drift, so change both
   in the same commit and run the tests.
-- `tooling/new-repo.sh` and `tooling/repo-template/` — how a new repo is created
-  (from `obilabs/repo-template`) and the fragments applied to an existing one.
+- `tooling/repo-template/` — the fragments (`SECURITY.md`, `README-footer.md`,
+  `.gitignore`) applied to a repository that already exists. A new repository is
+  created from `obilabs/repo-template` itself. Note: the org docs refer to a
+  `tooling/new-repo.sh` that does not exist in this repo yet; creating one (repo
+  from template, then branch protection with `enforce_admins`, secret scanning
+  and push protection) would make the documented path real.
 - `workflow-templates/` — what the GitHub "new workflow" UI offers org members.
 - `profile/README.md` — the org's public front page. It is marketing copy read by
   strangers: under-promise, describe what works today.
