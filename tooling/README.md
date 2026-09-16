@@ -9,7 +9,7 @@ and GitHub's own secret scanning.
 | Rule | Why |
 |---|---|
 | Commit with a GitHub **noreply** identity (`<id>+<user>@users.noreply.github.com`), never a personal webmail address. | Keeps personal addresses out of permanent, public commit metadata while still attributing the work. |
-| **No AI co-author trailers** (`Co-authored-by: Claude ...`, "Generated with Claude Code"). | AI is a tool, not a co-author. AI-assisted development is disclosed **once** in each README (see `repo-template/README-footer.md`). |
+| **No AI co-author trailers** (`Co-authored-by: Claude ...`, "Generated with Claude Code"). | AI is a tool, not a co-author. AI-assisted development is disclosed **once** in each README (see the footer in [obilabs/repo-template](https://github.com/obilabs/repo-template)). |
 | **No absolute user-home paths** (`C:\Users\<name>\`, `/Users/<name>/`, `/home/<name>/`). | They break portability and leak the developer's username. Use repo-relative paths or environment variables. | <!-- hygiene:allow -->
 | **No secrets** in files or history; no `.env` / key / credential files. | Rotating a leaked credential is expensive; a history rewrite is worse. Commit `.env.example` instead. |
 | **`main` changes only through a pull request.** | Every change on `main` is reviewed. Private repos on the Free plan cannot enforce this server-side, so the hook does it locally. |
@@ -101,8 +101,17 @@ Use them deliberately; CI still checks everything the local hooks skip.
 | Skip all pre-commit / pre-push content checks for one command | `OBILABS_HYGIENE_SKIP=1 git commit ...` (prints a loud warning) |
 | A genuine direct push to `main` (for example the first push of a brand-new repo) | `OBILABS_ALLOW_MAIN_PUSH=1 git push ...` |
 
-## Repository template
+## New repositories
 
-`tooling/repo-template/` holds the baseline files for new repositories:
-`.gitignore`, `SECURITY.md` (private vulnerability reporting), and
-`README-footer.md` with the one-line AI-assisted development disclosure.
+Every new repository starts from [obilabs/repo-template](https://github.com/obilabs/repo-template)
+(working rules in `CLAUDE.md`, Claude Code attribution off in `.claude/settings.json`, the hygiene
+workflow, `SECURITY.md`, Dependabot, and `docs/RELEASING.md`). Create one with:
+
+```sh
+sh tooling/new-repo.sh <name> <public|private>
+```
+
+It creates the repo from the template, turns on Dependabot alerts, and for public repos also
+secret scanning, push protection, security updates, private vulnerability reporting, and main
+protection that binds admins and requires the hygiene check, then proves the protection with a
+refused push. Private repos on the Free plan cannot be protected; the pre-push hook guards main.
