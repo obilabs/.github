@@ -129,18 +129,32 @@ command -v git >/dev/null 2>&1 || die "git is not installed"
 auth=$(gh auth status 2>&1) || die "gh is not authenticated. Run: gh auth login"
 printf '%s\n' "$auth" | sed 's/^/  /'
 
-scopes=$(printf '%s\n' "$auth" | sed -n 's/.*Token scopes: *//p' | tr -d "'" | tr ',' ' ')
-missing=''
-for need in repo read:org workflow; do
-  case " $scopes " in
-    *" $need "*) ;;
-    *) missing="$missing $need" ;;
-  esac
-done
-if [ -n "$missing" ]; then
-  die "the authenticated gh token is missing scope(s):$missing
+# Classic OAuth tokens report their scopes; fine-grained PATs and GitHub App
+# tokens (including Actions' GITHUB_TOKEN) report none, and their permissions
+# cannot be read from here. Check what we can, and say so when we cannot.
+scopes=$(printf '%s
+' "$auth" | sed -n 's/.*Token scopes: *//p' | tr -d "'" | tr ',' ' ' | tr -s ' ')
+case $scopes in
+  '' | ' ')
+    echo "  NOTE: this token reports no OAuth scopes (fine-grained PAT or GitHub App"
+    echo "        token), so its permissions cannot be checked here. It needs, on all"
+    echo "        $ORG repositories: Administration: Read and write, Contents: Read"
+    echo "        and write, Metadata: Read. Steps below fail plainly if it does not."
+    ;;
+  *)
+    missing=''
+    for need in repo read:org workflow; do
+      case " $scopes " in
+        *" $need "*) ;;
+        *) missing="$missing $need" ;;
+      esac
+    done
+    if [ -n "$missing" ]; then
+      die "the authenticated gh token is missing scope(s):$missing
   Add them with: gh auth refresh -h github.com -s $(echo "$missing" | tr ' ' ',' | sed 's/^,//')"
-fi
+    fi
+    ;;
+esac
 
 if [ "$DRY_RUN" -eq 0 ]; then
   gh api "orgs/$ORG" >/dev/null 2>&1 ||
