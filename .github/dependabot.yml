@@ -1,0 +1,10 @@
+version: 2
+updates:
+  # This repo is shell and workflow YAML only; the actions used inside the
+  # reusable hygiene workflow are the one thing worth watching. Every ObiLabs
+  # repo calls that workflow, so a stale pinned action here is stale everywhere.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
