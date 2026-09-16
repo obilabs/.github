@@ -51,7 +51,7 @@ jobs:
       # obilabs/.github is public, so this checkout needs no extra token even
       # when the calling repository is private.
       - name: Fetch the shared tooling
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: obilabs/.github
           ref: main
