@@ -1,0 +1,127 @@
+# Scheduled governance drift detector for the ObiLabs organisation.
+#
+# Runs tooling/org-drift.sh (the single source of truth - this workflow only
+# schedules it and delivers the report) and, when it finds drift, opens or
+# updates ONE rolling issue in this repository.
+#
+# Why an issue and not just a job summary: a job summary is only seen by someone
+# who opens the Actions run, which is exactly the person who is already paying
+# attention. An issue notifies, persists until it is closed, and can be argued
+# with. The job summary is written as well - it costs nothing and gives the run
+# its own record.
+#
+# TOKEN: the default GITHUB_TOKEN cannot read other repositories in the org, so
+# this needs a token with read access to every repo. Create a fine-grained PAT
+# (all repositories in obilabs; Repository permissions: Contents: Read,
+# Metadata: Read, Pull requests: Read, Administration: Read, Issues: Read and
+# write) and store it as the repository secret ORG_GOVERNANCE_TOKEN. Without it
+# the workflow reports that it could not run rather than reporting "all clear".
+name: Org drift
+
+on:
+  schedule:
+    - cron: '23 13 * * 1' # Mondays, 13:23 UTC
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'How many days of default-branch history to inspect'
+        type: string
+        default: '7'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: org-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Detect governance drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check the governance token is present
+        env:
+          TOKEN: ${{ secrets.ORG_GOVERNANCE_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error title=Missing ORG_GOVERNANCE_TOKEN::This check cannot read other repositories in the org without a token, so it is failing rather than reporting a false all-clear. See the header of .github/workflows/org-drift.yml for the exact scopes."
+            exit 1
+          fi
+
+      - name: Run the drift detector
+        id: drift
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.ORG_GOVERNANCE_TOKEN }}
+          DAYS: ${{ inputs.days || '7' }}
+        run: |
+          set -eu
+          rc=0
+          sh tooling/org-drift.sh --days "$DAYS" --quiet >report.md || rc=$?
+          echo "rc=$rc" >>"$GITHUB_OUTPUT"
+          cat report.md >>"$GITHUB_STEP_SUMMARY"
+          cat report.md
+          if [ "$rc" -gt 1 ]; then
+            echo "::error title=Drift check failed to run::org-drift.sh exited $rc - the result cannot be trusted"
+            exit "$rc"
+          fi
+
+      - name: Open or update the drift issue
+        if: ${{ steps.drift.outputs.rc == '1' }}
+        env:
+          GH_TOKEN: ${{ secrets.ORG_GOVERNANCE_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          title='Governance drift on obilabs'
+          {
+            cat report.md
+            echo ""
+            echo "---"
+            echo "Updated automatically by [\`org-drift.yml\`]($RUN_URL). Close this"
+            echo "issue once the items above are dealt with; the next run reopens it"
+            echo "if the drift is still there."
+          } >body.md
+          num=$(gh issue list --repo "$REPO" --state all --limit 50 \
+            --search "in:title \"$title\"" --json number,title \
+            --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")
+          if [ -n "$num" ]; then
+            gh issue edit "$num" --repo "$REPO" --body-file body.md
+            gh issue reopen "$num" --repo "$REPO" 2>/dev/null || true
+            echo "Updated issue #$num"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file body.md
+          fi
+
+      - name: Close the drift issue when clean
+        if: ${{ steps.drift.outputs.rc == '0' }}
+        env:
+          GH_TOKEN: ${{ secrets.ORG_GOVERNANCE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          title='Governance drift on obilabs'
+          num=$(gh issue list --repo "$REPO" --state open --limit 50 \
+            --search "in:title \"$title\"" --json number,title \
+            --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")
+          if [ -n "$num" ]; then
+            gh issue close "$num" --repo "$REPO" --comment "No drift in the latest run."
+            echo "Closed issue #$num"
+          else
+            echo "No drift, and no open drift issue."
+          fi
+
+      - name: Fail the run when drift was found
+        if: ${{ steps.drift.outputs.rc == '1' }}
+        run: |
+          echo "::error title=Governance drift::See the job summary and the tracking issue."
+          exit 1

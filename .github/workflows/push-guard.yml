@@ -1,0 +1,173 @@
+# Push guard: fail loudly, within minutes, when a commit reaches the default
+# branch without a pull request.
+#
+# WHAT THIS IS: detection, not prevention. A workflow runs AFTER the ref has
+# already moved, so it cannot refuse the push - only GitHub branch protection
+# (paid plan for private repos) can do that. What it changes is the delay and
+# the place: the weekly org-drift report becomes a failing run plus an issue in
+# the repository the violation happened in, a minute or two after the push.
+#
+# The "did this arrive through a pull request?" logic lives in exactly one
+# place - tooling/org-drift.sh --commit - and this workflow calls it. Do not
+# reimplement it here.
+#
+# Use it from another repository (.github/workflows/push-guard.yml):
+#
+#   name: Push guard
+#   on:
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: read
+#     pull-requests: read
+#     issues: write
+#   jobs:
+#     push-guard:
+#       uses: obilabs/.github/.github/workflows/push-guard.yml@main
+#
+# Canonical source: obilabs/.github, .github/workflows/push-guard.yml.
+name: Push guard
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+concurrency:
+  group: push-guard-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  push-guard:
+    name: Commits on the default branch came through a pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # obilabs/.github is public, so this checkout needs no extra token even
+      # when the calling repository is private.
+      - name: Fetch the shared tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: obilabs/.github
+          ref: main
+          path: .obilabs-tooling
+          persist-credentials: false
+
+      - name: Check every commit in this push
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+          REPO_FULL: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -eu
+          repo=${REPO_FULL#*/}
+
+          # Every commit the push introduced, not just the tip: a direct push of
+          # five commits must report five, not one. Falls back to the head sha
+          # when the payload has no commit list (workflow_dispatch, re-run).
+          shas=$(jq -r '[.commits[]?.id] | .[]' "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+          [ -n "$shas" ] || shas=$HEAD_SHA
+          count=$(printf '%s\n' "$shas" | grep -c . || true)
+          if [ "$count" -gt 20 ]; then
+            echo "::notice title=Large push::$count commits pushed; checking the newest 20."
+            shas=$(printf '%s\n' "$shas" | tail -20)
+          fi
+
+          : >violations.md
+          bad=0
+          broke=0
+          for sha in $shas; do
+            rc=0
+            out=$(sh .obilabs-tooling/tooling/org-drift.sh \
+              --org "$ORG" --repo "$repo" --commit "$sha" 2>&1) || rc=$?
+            printf '%s\n' "$out"
+            case $rc in
+              0) ;;
+              1) bad=$((bad + 1)); printf '%s\n\n' "$out" >>violations.md ;;
+              *) broke=1 ;;
+            esac
+          done
+
+          {
+            echo "bad=$bad"
+            echo "broke=$broke"
+            echo "branch=$BRANCH"
+          } >>"$GITHUB_OUTPUT"
+
+          if [ "$broke" -eq 1 ] && [ "$bad" -eq 0 ]; then
+            echo "::error title=Push guard could not run::org-drift.sh could not determine whether these commits came through a pull request. Treat this as unknown, not as clean."
+            exit 2
+          fi
+
+      - name: Open or update the violation issue
+        if: ${{ steps.check.outputs.bad != '0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_FULL: ${{ github.repository }}
+          SHORT: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          short=$(printf '%s' "$SHORT" | cut -c1-8)
+          title="Unreviewed push to \`$BRANCH\` ($short)"
+          {
+            echo "A push to \`$BRANCH\` in \`$REPO_FULL\` contained commit(s) with no"
+            echo "associated pull request. Pushed by @$ACTOR."
+            echo ""
+            cat violations.md
+            echo "---"
+            echo ""
+            echo "### What should have happened"
+            echo ""
+            echo "The work belongs on a feature branch, landed through a pull request:"
+            echo ""
+            echo '```sh'
+            echo "git switch -c <type>/<short-description> $short"
+            echo "git push -u origin <type>/<short-description>"
+            echo "gh pr create"
+            echo '```'
+            echo ""
+            echo "### What this check could not do"
+            echo ""
+            echo "It could not stop the push. The ref had already moved when this ran."
+            echo "Server-side prevention needs branch protection with \`enforce_admins\`,"
+            echo "which on a private repository needs GitHub Team. Until then, run"
+            echo "\`sh tooling/preflight.sh\` in every clone and agent worktree - it refuses"
+            echo "to let work start on \`$BRANCH\` in the first place."
+            echo ""
+            echo "Opened by [\`push-guard.yml\`]($RUN_URL). Close this issue once the"
+            echo "change has been reviewed (or reverted and redone through a PR)."
+          } >body.md
+
+          num=$(gh issue list --repo "$REPO_FULL" --state all --limit 50 \
+            --search "in:title \"$short\"" --json number,title \
+            --jq "[.[] | select(.title == \"$title\") | .number] | first // empty")
+          if [ -n "$num" ]; then
+            gh issue edit "$num" --repo "$REPO_FULL" --body-file body.md
+            gh issue reopen "$num" --repo "$REPO_FULL" 2>/dev/null || true
+            echo "Updated issue #$num"
+          else
+            gh issue create --repo "$REPO_FULL" --title "$title" --body-file body.md ||
+              echo "::warning title=Could not open an issue::Check that the calling workflow grants 'issues: write'."
+          fi
+
+      - name: Fail the run
+        if: ${{ steps.check.outputs.bad != '0' }}
+        run: |
+          {
+            echo "## Push guard: ${{ steps.check.outputs.bad }} unreviewed commit(s)"
+            echo ""
+            cat violations.md
+          } >>"$GITHUB_STEP_SUMMARY"
+          echo "::error title=Unreviewed push to ${{ steps.check.outputs.branch }}::${{ steps.check.outputs.bad }} commit(s) reached the default branch without a pull request. See the issue opened on this repository."
+          exit 1

@@ -63,6 +63,7 @@ new_repo() {
 g() { git -C "$r" "$@"; }
 # stage_line <file> <content>
 stage_line() { printf '%s\n' "$2" >>"$r/$1" && g add -- "$1"; }
+# shellcheck disable=SC2120  # the optional message argument is used below.
 commit() { g commit -q -m "${1:-test commit}"; }
 
 # --- fake credential material, assembled so no literal appears in this file ---
@@ -81,6 +82,7 @@ done
 echo "# install"
 expect_ok "install.sh succeeds" sh "$hooks_src/install.sh"
 hp=$(git config --global --get core.hooksPath)
+# shellcheck disable=SC2088  # asserting the stored value IS the literal '~' form.
 if [ "$hp" = '~/.config/obilabs/git-hooks' ]; then ok "global core.hooksPath is ~-relative"; else notok "global core.hooksPath is ~-relative (got '$hp')"; fi
 if [ -x "$HOME/.config/obilabs/git-hooks/pre-commit" ] && [ -f "$HOME/.config/obilabs/git-hooks/hygiene-lib.sh" ]; then
   ok "hooks copied to ~/.config/obilabs/git-hooks"

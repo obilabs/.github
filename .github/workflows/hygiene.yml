@@ -5,7 +5,16 @@
 #     hygiene:
 #       uses: obilabs/.github/.github/workflows/hygiene.yml@main
 #
-# Scans only the commits introduced by the PR or push:
+# Scheduled full-history scan (catches secrets that predate this workflow, or
+# that arrived through a direct push to main):
+#     on:
+#       schedule: [{ cron: '17 6 * * 1' }]
+#     jobs:
+#       full:
+#         uses: obilabs/.github/.github/workflows/hygiene.yml@main
+#         with: { scan: full }
+#
+# In the default 'range' mode it scans only the commits introduced by the PR or push:
 #   1. gitleaks secret scan (honours a repo .gitleaks.toml)
 #   2. commit identity + AI co-author trailer check
 #   3. absolute user-home paths in added lines (mirrors tooling/git-hooks)
@@ -13,6 +22,15 @@ name: Hygiene (reusable)
 
 on:
   workflow_call:
+    inputs:
+      scan:
+        description: >-
+          'range' (default) scans only the commits introduced by this PR or push.
+          'full' scans the ENTIRE repository history for secrets - use it from a
+          scheduled trigger, so a secret that landed before this workflow existed
+          (or through a direct push) is still found.
+        type: string
+        default: range
 
 permissions:
   contents: read
@@ -34,6 +52,7 @@ jobs:
       - name: Resolve commit range
         id: range
         env:
+          SCAN_MODE: ${{ inputs.scan }}
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
@@ -45,6 +64,24 @@ jobs:
           empty_tree=$(git hash-object -t tree /dev/null)
           head=$HEAD_SHA
           base=""
+          case ${SCAN_MODE:-range} in
+            range | full) ;;
+            *) echo "::error title=Bad input::scan must be 'range' or 'full', got '$SCAN_MODE'"; exit 2 ;;
+          esac
+          if [ "${SCAN_MODE:-range}" = full ]; then
+            # Full-history mode: scan every commit reachable from every ref, and
+            # skip the identity/trailer/path checks (those are a gate on NEW
+            # commits; re-reporting a decade of history each night is noise).
+            {
+              echo "log_range=--all"
+              echo "diff_base="
+              echo "head=$head"
+              echo "full=1"
+            } >>"$GITHUB_OUTPUT"
+            echo "Full-history secret scan (--all)."
+            exit 0
+          fi
+          echo "full=0" >>"$GITHUB_OUTPUT"
           case $EVENT_NAME in
             pull_request | pull_request_target)
               head=$PR_HEAD
@@ -97,7 +134,7 @@ jobs:
           exit "$rc"
 
       - name: Commit identity and AI trailer check
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.range.outputs.full == '0' }}
         env:
           LOG_RANGE: ${{ steps.range.outputs.log_range }}
         run: |
@@ -127,7 +164,7 @@ jobs:
           exit "$fail"
 
       - name: Absolute user-home path check
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.range.outputs.full == '0' }}
         env:
           DIFF_BASE: ${{ steps.range.outputs.diff_base }}
           HEAD_SHA: ${{ steps.range.outputs.head }}
