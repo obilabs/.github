@@ -35,6 +35,8 @@ fi
 # Store a ~-relative value when installing to the default location so the
 # global git config carries no username-bearing absolute path.
 if [ -z "${OBILABS_CONFIG_DIR:-}" ]; then
+  # Literal '~' on purpose - see the comment above.
+  # shellcheck disable=SC2088
   hooks_path='~/.config/obilabs/git-hooks'
 else
   hooks_path=$dest

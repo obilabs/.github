@@ -4,13 +4,24 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: '17 6 * * 1' # Mondays: full-history secret scan
 
 permissions:
   contents: read
 
 jobs:
   hygiene:
+    if: github.event_name != 'schedule'
     uses: ./.github/workflows/hygiene.yml
+
+  # Dogfood the scheduled mode: every commit reachable from every ref, so a
+  # secret that predates this workflow is still found.
+  hygiene-full:
+    if: github.event_name == 'schedule'
+    uses: ./.github/workflows/hygiene.yml
+    with:
+      scan: full
 
   hook-tests:
     name: Hook tests (${{ matrix.os }})
@@ -27,3 +38,96 @@ jobs:
       - name: Run hook test suite
         shell: bash
         run: sh tooling/git-hooks/test/run.sh
+
+  shell-lint:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: POSIX sh syntax check
+        run: |
+          set -eu
+          rc=0
+          for f in $(git ls-files '*.sh'); do
+            if sh -n "$f"; then echo "ok   $f"; else echo "FAIL $f"; rc=1; fi
+          done
+          exit "$rc"
+      - name: shellcheck
+        run: |
+          set -eu
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # SC2317: unreachable-code false positives on trap handlers.
+          shellcheck --shell=sh --severity=warning --exclude=SC2317             $(git ls-files '*.sh')
+
+  new-repo-dry-run:
+    name: new-repo.sh --dry-run (creates nothing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Argument validation refuses bad input
+        run: |
+          set -eu
+          fail=0
+          check() { # check <desc> <expected-rc> <args...>
+            _d=$1; _rc=$2; shift 2
+            got=0; sh tooling/new-repo.sh "$@" >/dev/null 2>&1 || got=$?
+            if [ "$got" -eq "$_rc" ]; then echo "ok   $_d (rc=$got)"
+            else echo "FAIL $_d (want rc=$_rc, got $got)"; fail=1; fi
+          }
+          check "no arguments"              2
+          check "one argument"              2 widget
+          check "bad visibility"            1 widget internal
+          check "name with a space"         1 "bad name" private
+          check "reserved name .git"        1 .git private
+          check "unknown option"            1 widget public --bogus
+          exit "$fail"
+      - name: Dry run touches no GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # --dry-run only reads; it must never print a mutating gh command
+          # without the [dry-run] marker.
+          sh tooling/new-repo.sh ci-dry-run-widget private --dry-run >out.txt 2>&1 || true
+          cat out.txt
+          if grep -E '^\s*(gh repo create|gh api -X (PUT|POST|PATCH|DELETE))' out.txt; then
+            echo "::error title=Dry run leaked a real command::a mutating command was printed without the [dry-run] marker"
+            exit 1
+          fi
+          grep -q 'would create obilabs/ci-dry-run-widget' out.txt
+          echo "Dry run is inert."
+
+  drift-detector:
+    name: org-drift.sh (self-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Argument validation
+        run: |
+          set -eu
+          fail=0
+          got=0; sh tooling/org-drift.sh --days abc >/dev/null 2>&1 || got=$?
+          [ "$got" -eq 2 ] && echo "ok   non-numeric --days rejected" || { echo "FAIL --days"; fail=1; }
+          got=0; sh tooling/org-drift.sh --nonsense >/dev/null 2>&1 || got=$?
+          [ "$got" -eq 2 ] && echo "ok   unknown argument rejected" || { echo "FAIL unknown arg"; fail=1; }
+          exit "$fail"
+      - name: Runs against this repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          rc=0
+          sh tooling/org-drift.sh --days 7 --repo .github --quiet >report.md || rc=$?
+          cat report.md
+          # 0 (clean) and 1 (drift found) are both a working detector;
+          # 2 means the detector itself broke.
+          [ "$rc" -le 1 ] || exit "$rc"

@@ -22,11 +22,58 @@ Each layer catches what the previous one missed.
 |---|---|---|
 | 1. Local git hooks | `tooling/git-hooks/`, installed once per machine | Webmail identity, secrets and user-home paths in added lines, personal denylist strings, credential-shaped filenames (pre-commit); strips AI trailers (commit-msg); direct pushes to `main`/`master`, webmail identities and AI trailers in pushed commits (pre-push). |
 | 2. CI reusable workflow | `.github/workflows/hygiene.yml`, called from every repo | gitleaks secret scan, commit identity + AI trailer check, and user-home path check over the commits in each PR / push. Runs even when someone never installed the hooks or used an escape hatch. |
-| 3. GitHub push protection | Public repositories (secret scanning enabled) | Known provider token formats, rejected by GitHub before they land. |
+| 3. GitHub push protection | Public repositories (secret scanning enabled) | Known provider token formats, rejected by GitHub before they land. Private repos are plan-gated, so layer 2 is their only scanner. |
+| 4. Org drift detector | `tooling/org-drift.sh`, scheduled weekly | **After the fact**: commits that reached `main` without a PR, protection or secret scanning that got turned off, repos that never adopted layer 2. |
+
+See **[docs/GOVERNANCE.md](../docs/GOVERNANCE.md)** for what is actually
+*enforced* versus what is only *detected*, and what a paid plan would change.
+
+## Create a new repository
+
+```sh
+sh tooling/new-repo.sh <repo-name> <public|private> [--dry-run] [--no-clone]
+```
+
+Creates `obilabs/<repo-name>` from `obilabs/repo-template` and applies every
+governance setting the plan allows, in order:
+
+1. validates the name and visibility, and that `gh` is authenticated with the
+   `repo`, `read:org` and `workflow` scopes;
+2. `gh repo create --template obilabs/repo-template`, then waits for `main`;
+3. branch protection on `main` requiring a pull request, **plus an explicit
+   `enforce_admins` call**, then reads the protection back to verify it;
+4. secret scanning, push protection, Dependabot alerts and security updates;
+   squash-only merges and delete-branch-on-merge;
+5. clones the repo and sets `user.name` / `user.email` to the ObiLabs noreply
+   identity, then checks `core.hooksPath` points at the org hooks;
+6. prints what was applied, what was skipped, and a checklist of what the owner
+   must still click.
+
+It is **idempotent**: run it again on an existing repo and it re-applies the
+settings instead of failing (it never changes an existing repo's visibility).
+
+On a **private** repo GitHub answers *"Upgrade to GitHub Pro"* for protection and
+secret scanning. The script detects that, prints a plain warning that the local
+pre-push hook is then the only guard, and **continues** - refusing to create the
+repo would not change the plan.
+
+`--dry-run` prints every command it would run and changes nothing; it still does
+the read-only checks (auth, scopes, whether the repo already exists) so the dry
+run takes the same branch a real run would.
 
 ## Install the local hooks
 
-macOS / Linux / Git Bash:
+**New machine, rebuilt VM, or a fresh agent worktree - one command:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/obilabs/.github/main/tooling/bootstrap.sh | sh
+```
+
+(`obilabs/.github` is public, so no token is needed. `bootstrap.sh` clones this
+repo to a temp dir, runs `install.sh`, verifies the result and fails loudly if a
+hook is missing.)
+
+From an existing clone - macOS / Linux / Git Bash:
 
 ```sh
 sh tooling/git-hooks/install.sh
@@ -91,6 +138,55 @@ jobs:
 A `.gitleaks.toml` at the repository root is honoured automatically (use it to
 allowlist test fixtures).
 
+### Scheduled full-history secret scan
+
+The default `scan: range` mode looks only at the commits a PR or push
+introduces. Add a weekly `scan: full` pass so a secret that predates the
+workflow - or one that arrived through a direct push to an unprotected `main` -
+is still found:
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 6 * * 1'
+
+jobs:
+  hygiene:
+    if: github.event_name != 'schedule'
+    uses: obilabs/.github/.github/workflows/hygiene.yml@main
+  hygiene-full:
+    if: github.event_name == 'schedule'
+    uses: obilabs/.github/.github/workflows/hygiene.yml@main
+    with:
+      scan: full
+```
+
+In `full` mode only the secret scan runs, over every commit reachable from every
+ref.
+
+## Detect drift across the organisation
+
+```sh
+sh tooling/org-drift.sh --days 7
+```
+
+Reports, for every non-archived repo in the org: commits that reached the default
+branch **without a pull request**, whether protection is on and binds admins,
+whether secret scanning is on, and whether the repo calls the hygiene workflow at
+all. Exits `1` on drift.
+
+`.github/workflows/org-drift.yml` runs it weekly and keeps one rolling issue in
+this repository up to date. It needs an `ORG_GOVERNANCE_TOKEN` secret (a
+fine-grained PAT that can read every repo in the org); without it the workflow
+fails rather than reporting a false all-clear.
+
+**This is detection, not prevention.** A direct push to a private repo's `main`
+on the Free plan succeeds; this reports it afterwards. The limits are spelled out
+in [docs/GOVERNANCE.md](../docs/GOVERNANCE.md).
+
 ## Escape hatches
 
 Use them deliberately; CI still checks everything the local hooks skip.
@@ -103,6 +199,7 @@ Use them deliberately; CI still checks everything the local hooks skip.
 
 ## Repository template
 
-`tooling/repo-template/` holds the baseline files for new repositories:
+New repositories are created with `tooling/new-repo.sh` (above) from
+`obilabs/repo-template`. `tooling/repo-template/` holds the baseline files:
 `.gitignore`, `SECURITY.md` (private vulnerability reporting), and
 `README-footer.md` with the one-line AI-assisted development disclosure.
