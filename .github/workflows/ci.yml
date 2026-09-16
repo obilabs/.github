@@ -147,9 +147,12 @@ jobs:
           [ "$rc" -eq 0 ] || { echo "FAIL good checkout should exit 0, got $rc"; exit 1; }
 
           # --- an unreviewed commit on origin/main is reported ---------------
-          git init -q --bare "$root/remote.git"
+          git init -q --bare -b main "$root/remote.git"
           git clone -q "$root/remote.git" "$root/clone"
           cd "$root/clone"
+          # A clone of an empty repo inherits the runner's init.defaultBranch,
+          # which is not necessarily 'main'.
+          git switch -qc main 2>/dev/null || true
           git config user.email '1+u@users.noreply.github.com'
           git config user.name 'Michael Agu'
           echo 1 >f && git add f
