@@ -57,15 +57,20 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   exit 2
 }
 
+[ "$QUIET" -eq 1 ] || echo "preflight: $(git rev-parse --show-toplevel)"
+
 # Shared with org-drift.sh: one definition of the "names a PR" heuristic.
 _lib=${SELF_DIR:-.}/lib/pr-subject.sh
 if [ -r "$_lib" ]; then
   # shellcheck source=tooling/lib/pr-subject.sh
   . "$_lib"
 else
-  # Running from a copy that was installed without the lib (for example a hook
-  # directory). Say so rather than silently using a different rule.
+  # Running as a standalone copy (piped from curl, or copied to
+  # ~/.config/obilabs/) with no lib beside it. Same rule, kept in sync by hand -
+  # say so rather than pretending the shared definition was used.
   subject_names_pr() { printf '%s' "$1" | grep -Eq '\(#[0-9]+\)|^Merge pull request #[0-9]+'; }
+  [ "$QUIET" -eq 1 ] ||
+    echo "  note  standalone copy: using the built-in copy of the PR-subject rule"
 fi
 
 FAILS=''
@@ -73,8 +78,6 @@ fail() { FAILS="$FAILS  FAIL  $1
 "; }
 ok() { [ "$QUIET" -eq 1 ] || echo "  ok    $1"; }
 note() { [ "$QUIET" -eq 1 ] || echo "  note  $1"; }
-
-[ "$QUIET" -eq 1 ] || echo "preflight: $(git rev-parse --show-toplevel)"
 
 # ------------------------------------------------------------- 1. hooks ----
 # The installer stores a ~-relative path, so accept both spellings; a LOCAL

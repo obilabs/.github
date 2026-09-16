@@ -36,6 +36,13 @@ See **[docs/GOVERNANCE.md](../docs/GOVERNANCE.md)** for what is actually
 sh tooling/preflight.sh [--dir PATH] [--no-fetch] [--quiet]
 ```
 
+It checks the repository it runs **in**. From a repo that is not this one, use a
+standalone copy:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/obilabs/.github/main/tooling/preflight.sh | sh
+```
+
 Exits `0` when it is safe to work here, `1` with a plain explanation of what to
 fix, `2` when it could not run. It checks that the ObiLabs hooks are active in
 this repository, that `user.email` is the noreply address, that the checkout is

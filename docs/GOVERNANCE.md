@@ -35,8 +35,14 @@ either skippable (1, 2) or after the fact (4, 5, 6).
 ## Layer 1 - preflight (ADVISES ONLY)
 
 ```sh
-sh tooling/preflight.sh          # in any ObiLabs clone
+sh tooling/preflight.sh                 # from a clone of obilabs/.github
+sh ~/.config/obilabs/preflight.sh       # installed copy, from any repo
+curl -fsSL https://raw.githubusercontent.com/obilabs/.github/main/tooling/preflight.sh | sh
 ```
+
+It checks the repository it is run **in**, not the one it lives in (`--dir PATH`
+to point it elsewhere). Other repos do not carry a copy - use one of the last
+two forms there.
 
 Four checks, about a second (2-3 on Windows Git Bash), exit `1` with a plain
 explanation of what to fix:
@@ -63,15 +69,15 @@ whole purpose - see the block below.
 
 ### The block to put in a repository's `CLAUDE.md`
 
-Already in `obilabs/repo-template`, so new repositories inherit it. For an
-existing repo, paste this verbatim:
+Landing in `obilabs/repo-template` (obilabs/repo-template#1) so new
+repositories inherit it. For an existing repo, paste this verbatim:
 
 ```markdown
 ## Preflight - run this before you touch anything
 
 Before your first commit in this repo, run:
 
-    sh tooling/preflight.sh     # or: curl -fsSL https://raw.githubusercontent.com/obilabs/.github/main/tooling/preflight.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/obilabs/.github/main/tooling/preflight.sh | sh
 
 **If it exits non-zero: STOP.** Report the failure to the user, in full, and
 wait for them. Do not commit, do not push, and do not work around it - not with
