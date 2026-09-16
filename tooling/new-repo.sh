@@ -3,6 +3,7 @@
 # governance setting the plan allows.
 #
 #   sh tooling/new-repo.sh <repo-name> <public|private> [--dry-run] [--no-clone]
+#                          [--require-existing] [--require-check CONTEXT]...
 #
 # Idempotent: re-running against an existing repository re-applies the settings
 # and reports them instead of failing. Settings GitHub gates behind a paid plan
@@ -27,32 +28,51 @@ DRY_RUN=0
 CLONE=1
 NAME=''
 VISIBILITY=''
+REQUIRE_EXISTING=0
+# Newline-separated list of required status-check contexts, empty by default:
+# requiring a check a repository does not actually run would leave every pull
+# request waiting forever.
+REQUIRE_CHECKS=''
 
 die() { echo "new-repo: $*" >&2; exit 1; }
 usage() {
   cat >&2 <<EOF
 usage: sh tooling/new-repo.sh <repo-name> <public|private> [--dry-run] [--no-clone]
+                              [--require-existing] [--require-check CONTEXT]...
 
   <repo-name>   1-64 chars, letters/digits/._- , must start with a letter or digit
   public|private
-  --dry-run     print the commands that would run; change nothing
-  --no-clone    do not clone the new repository locally
+  --dry-run          print the commands that would run; change nothing
+  --no-clone         do not clone the new repository locally
+  --require-existing fail instead of creating the repository (used by
+                     tooling/apply-protection.sh, which must never create one)
+  --require-check C  require status check "C" on main; repeat for several.
+                     Only pass checks the repo really runs, or pull requests
+                     will wait forever.
 EOF
   exit 2
 }
 
 # ---------------------------------------------------------------- arguments --
-for arg in "$@"; do
-  case $arg in
-    --dry-run) DRY_RUN=1 ;;
-    --no-clone) CLONE=0 ;;
+while [ $# -gt 0 ]; do
+  case $1 in
+    --dry-run) DRY_RUN=1; shift ;;
+    --no-clone) CLONE=0; shift ;;
+    --require-existing) REQUIRE_EXISTING=1; shift ;;
+    --require-check)
+      [ $# -ge 2 ] || die "--require-check needs a check name"
+      REQUIRE_CHECKS="$REQUIRE_CHECKS$2
+"
+      shift 2
+      ;;
     -h | --help) usage ;;
-    -*) die "unknown option: $arg (see --help)" ;;
+    -*) die "unknown option: $1 (see --help)" ;;
     *)
-      if [ -z "$NAME" ]; then NAME=$arg
-      elif [ -z "$VISIBILITY" ]; then VISIBILITY=$arg
-      else die "unexpected extra argument: $arg"
+      if [ -z "$NAME" ]; then NAME=$1
+      elif [ -z "$VISIBILITY" ]; then VISIBILITY=$1
+      else die "unexpected extra argument: $1"
       fi
+      shift
       ;;
   esac
 done
@@ -66,7 +86,14 @@ esac
 
 # GitHub allows more than this; we deliberately allow less so repo names stay
 # predictable in URLs, image tags and directory names.
-if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'; then
+if [ "$REQUIRE_EXISTING" -eq 1 ]; then
+  # The repo already exists, so GitHub's own naming rules have already been
+  # applied to it; only reject characters that would be unsafe in a URL path.
+  # (obilabs/.github is a real repository and starts with a dot.)
+  if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9._-]{1,64}$'; then
+    die "invalid repo name '$NAME': use 1-64 chars of [A-Za-z0-9._-]"
+  fi
+elif ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'; then
   die "invalid repo name '$NAME': use 1-64 chars of [A-Za-z0-9._-], starting with a letter or digit"
 fi
 case $NAME in
@@ -182,6 +209,9 @@ if [ "$exists" -eq 1 ]; then
     note_skipped "visibility change $cur -> $VISIBILITY (change it by hand if intended)"
     VISIBILITY=$cur
   fi
+elif [ "$REQUIRE_EXISTING" -eq 1 ]; then
+  die "$REPO does not exist, and --require-existing was given. This mode only
+  re-applies settings to repositories that already exist; it never creates one."
 else
   run "create" gh repo create "$REPO" \
     --template "$TEMPLATE" \
@@ -205,17 +235,45 @@ fi
 # ------------------------------------------------------- 3. branch protection --
 echo "==> Branch protection on main"
 protection_ok=0
+
+# required_status_checks: null unless the caller named checks this repo really
+# runs. Built as JSON rather than -F flags so a list can be passed at all.
+checks_json=null
+if [ -n "$REQUIRE_CHECKS" ]; then
+  _ctx=''
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    # Only the two characters JSON strings must escape appear in check names.
+    c=$(printf '%s' "$c" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    _ctx="$_ctx\"$c\","
+  done <<EOF
+$REQUIRE_CHECKS
+EOF
+  checks_json="{\"strict\":true,\"contexts\":[${_ctx%,}]}"
+  echo "  Requiring status check(s): $(printf '%s' "$REQUIRE_CHECKS" | tr '\n' ' ')"
+fi
+
+PROT_BODY=$(mktemp) || die "cannot create a temporary file"
+trap 'rm -f "$PROT_BODY"' EXIT INT TERM
+cat >"$PROT_BODY" <<EOF
+{
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 0,
+    "dismiss_stale_reviews": true
+  },
+  "required_status_checks": $checks_json,
+  "enforce_admins": true,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_linear_history": true,
+  "required_conversation_resolution": true
+}
+EOF
+
 gh_api PUT "repos/$REPO/branches/main/protection" \
   -H "Accept: application/vnd.github+json" \
-  -F required_pull_request_reviews[required_approving_review_count]=0 \
-  -F required_pull_request_reviews[dismiss_stale_reviews]=true \
-  -F required_status_checks=null \
-  -F enforce_admins=true \
-  -F restrictions=null \
-  -F allow_force_pushes=false \
-  -F allow_deletions=false \
-  -F required_linear_history=true \
-  -F required_conversation_resolution=true
+  --input "$PROT_BODY"
 
 if [ "$GH_API_RC" -eq 0 ]; then
   # enforce_admins must be set explicitly too: the PUT above can silently leave
@@ -228,10 +286,25 @@ if [ "$GH_API_RC" -eq 0 ]; then
     pr_req=$(printf '%s' "$read_back" | grep -c 'required_pull_request_reviews' || true)
     adm=$(printf '%s' "$read_back" |
       tr ',' '\n' | grep -A1 'enforce_admins' | grep -c '"enabled":true' || true)
-    if [ "$pr_req" -gt 0 ] && [ "$adm" -gt 0 ]; then
+    checks_ok=1
+    if [ -n "$REQUIRE_CHECKS" ]; then
+      while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        printf '%s' "$read_back" | grep -qF "$c" || {
+          echo "  WARNING: required check '$c' did not read back." >&2
+          checks_ok=0
+        }
+      done <<EOF
+$REQUIRE_CHECKS
+EOF
+    fi
+    if [ "$pr_req" -gt 0 ] && [ "$adm" -gt 0 ] && [ "$checks_ok" -eq 1 ]; then
       echo "  Verified: pull request required on main, and admins are bound by it."
+      [ -n "$REQUIRE_CHECKS" ] && echo "  Verified: required status check(s) are set."
       protection_ok=1
       note_applied "branch protection on main (PR required, enforce_admins=true, no force-push, no deletion)"
+      [ -n "$REQUIRE_CHECKS" ] &&
+        note_applied "required status check(s): $(printf '%s' "$REQUIRE_CHECKS" | tr '\n' ' ')"
     else
       echo "  WARNING: protection was written but did not read back as expected." >&2
       printf '%s\n' "$read_back" | head -c 600 | sed 's/^/    /' >&2

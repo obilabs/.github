@@ -1,0 +1,14 @@
+name: Push guard
+
+on:
+  push:
+    branches: [$default-branch]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  push-guard:
+    uses: obilabs/.github/.github/workflows/push-guard.yml@main

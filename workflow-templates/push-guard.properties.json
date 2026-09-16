@@ -1,0 +1,6 @@
+{
+  "name": "ObiLabs Push guard",
+  "description": "Fails the run and opens an issue within minutes when a commit reaches the default branch without a pull request. Detection, not prevention - it runs after the ref has moved.",
+  "categories": ["Security"],
+  "filePatterns": [".*"]
+}

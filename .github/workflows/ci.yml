@@ -103,6 +103,113 @@ jobs:
           grep -q 'would create obilabs/ci-dry-run-widget' out.txt
           echo "Dry run is inert."
 
+  preflight:
+    name: preflight.sh (throwaway repos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Argument validation
+        run: |
+          set -eu
+          got=0; sh tooling/preflight.sh --nonsense >/dev/null 2>&1 || got=$?
+          [ "$got" -eq 2 ] || { echo "FAIL unknown argument should exit 2, got $got"; exit 1; }
+          got=0; sh tooling/preflight.sh --dir /nope/nope >/dev/null 2>&1 || got=$?
+          [ "$got" -eq 2 ] || { echo "FAIL missing dir should exit 2, got $got"; exit 1; }
+          echo "ok   arguments"
+      - name: Catches a bad checkout, passes a good one
+        run: |
+          set -eu
+          root=$(mktemp -d)
+          # --- bad: on main, webmail identity, no ObiLabs hooks ---------------
+          git init -q -b main "$root/bad"
+          git -C "$root/bad" config user.email dev@gmail.example
+          git -C "$root/bad" config user.name Dev
+          rc=0
+          out=$(sh "$PWD/tooling/preflight.sh" --dir "$root/bad" --no-fetch 2>&1) || rc=$?
+          echo "$out"
+          [ "$rc" -eq 1 ] || { echo "FAIL bad checkout should exit 1, got $rc"; exit 1; }
+          echo "$out" | grep -q "you are on 'main'" || { echo "FAIL no branch complaint"; exit 1; }
+          echo "$out" | grep -q 'not a GitHub noreply address' || { echo "FAIL no identity complaint"; exit 1; }
+          echo "$out" | grep -q 'hooks are not installed' || { echo "FAIL no hooks complaint"; exit 1; }
+
+          # --- good: hooks installed, noreply identity, feature branch --------
+          sh tooling/git-hooks/install.sh >/dev/null
+          git init -q -b main "$root/good"
+          git -C "$root/good" config user.email '1+u@users.noreply.github.com'
+          git -C "$root/good" config user.name 'Michael Agu'
+          git -C "$root/good" switch -qc feature/x
+          rc=0
+          out=$(sh "$PWD/tooling/preflight.sh" --dir "$root/good" --no-fetch 2>&1) || rc=$?
+          echo "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL good checkout should exit 0, got $rc"; exit 1; }
+
+          # --- an unreviewed commit on origin/main is reported ---------------
+          git init -q --bare "$root/remote.git"
+          git clone -q "$root/remote.git" "$root/clone"
+          cd "$root/clone"
+          git config user.email '1+u@users.noreply.github.com'
+          git config user.name 'Michael Agu'
+          echo 1 >f && git add f
+          git commit -qm 'feat: reviewed (#1)'
+          git tag v1
+          echo 2 >f && git commit -qam 'chore: straight to main'
+          OBILABS_ALLOW_MAIN_PUSH=1 git push -q origin main
+          git switch -qc feature/y
+          rc=0
+          out=$(sh "$GITHUB_WORKSPACE/tooling/preflight.sh" --no-fetch 2>&1) || rc=$?
+          echo "$out"
+          [ "$rc" -eq 1 ] || { echo "FAIL unreviewed commit should exit 1, got $rc"; exit 1; }
+          echo "$out" | grep -q 'straight to main' || { echo "FAIL commit not named"; exit 1; }
+          echo "All preflight cases behaved."
+      - name: Fast enough to actually get run
+        run: |
+          set -eu
+          start=$(date +%s)
+          sh tooling/preflight.sh --no-fetch --quiet >/dev/null 2>&1 || true
+          end=$(date +%s)
+          echo "preflight took $((end - start))s"
+          [ $((end - start)) -le 5 ] || { echo "FAIL preflight is too slow to be run habitually"; exit 1; }
+
+  apply-protection-dry-run:
+    name: apply-protection.sh --dry-run (changes nothing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Argument validation
+        run: |
+          set -eu
+          fail=0
+          check() { # check <desc> <expected-rc> <args...>
+            _d=$1; _rc=$2; shift 2
+            got=0; sh tooling/apply-protection.sh "$@" >/dev/null 2>&1 || got=$?
+            if [ "$got" -eq "$_rc" ]; then echo "ok   $_d (rc=$got)"
+            else echo "FAIL $_d (want rc=$_rc, got $got)"; fail=1; fi
+          }
+          check "no arguments"          2
+          check "--all with a name"     2 --all widget
+          check "unknown option"        2 --bogus
+          exit "$fail"
+      - name: Dry run against this repository only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sh tooling/apply-protection.sh .github --dry-run >out.txt 2>&1 || true
+          cat out.txt
+          if grep -E '^\s*gh api -X (PUT|POST|PATCH|DELETE)' out.txt; then
+            echo "::error title=Dry run leaked a real command::a mutating command was printed without the [dry-run] marker"
+            exit 1
+          fi
+          grep -q 'DRY RUN' out.txt
+          grep -q 'dry run - nothing applied' out.txt
+          echo "Dry run is inert."
+
   drift-detector:
     name: org-drift.sh (self-check)
     runs-on: ubuntu-latest
