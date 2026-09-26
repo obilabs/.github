@@ -184,6 +184,28 @@ else
     note "--no-fetch: checking the local copy of $remote_main, which may be stale"
   fi
 
+  # Commits the repository has already accounted for. A repo-local
+  # .preflight-accepted-history file (one "<sha> <date> <reason>" per line,
+  # blank lines and # comments ignored) exempts named commits from the check
+  # below. It lives IN the repository on purpose: adding a line is a reviewed
+  # pull request, not a local override nobody can see. Use it for history that
+  # predates branch protection, never to excuse a fresh direct push.
+  accepted=''
+  accepted_file=$(git rev-parse --show-toplevel 2>/dev/null)/.preflight-accepted-history
+  if [ -f "$accepted_file" ]; then
+    accepted=$(sed -e 's/#.*//' "$accepted_file" | awk '{print $1}' | grep -E '^[0-9a-f]{7,40}$' || true)
+  fi
+  # A sha is accepted when a listed value is a prefix of it, or it of a listed
+  # value, so the file may hold short or full hashes.
+  is_accepted() {
+    [ -n "$accepted" ] || return 1
+    for a in $accepted; do
+      case "$1" in "$a"*) return 0 ;; esac
+      case "$a" in "$1"*) return 0 ;; esac
+    done
+    return 1
+  }
+
   # Window: since the last tag on the remote branch, falling back to the
   # merge-base with this branch when the repo has no tags. The tag is preferred
   # deliberately - a branch cut FROM a drifted main has a merge-base after the
@@ -204,10 +226,16 @@ else
   else
     suspects=''
     n=0
+    skipped=0
     # --no-merges + subject only, one commit per line.
     while IFS= read -r line; do
       [ -n "$line" ] || continue
+      sha=${line%% *}
       subj=${line#* }
+      if is_accepted "$sha"; then
+        skipped=$((skipped + 1))
+        continue
+      fi
       if ! subject_names_pr "$subj"; then
         n=$((n + 1))
         [ "$n" -le 20 ] && suspects="$suspects
@@ -216,6 +244,7 @@ else
     done <<EOF
 $(git log --no-merges --format='%h %s' "$start".."$remote_main" 2>/dev/null || true)
 EOF
+    [ "$skipped" -gt 0 ] && note "$skipped commit(s) exempted by .preflight-accepted-history"
     if [ -n "$suspects" ]; then
       [ "$n" -gt 20 ] && suspects="$suspects
           ... and $((n - 20)) more"
@@ -224,7 +253,12 @@ EOF
 
         This is a HEURISTIC, not proof - a rewritten history loses the real
         association. Confirm before acting on it:
-          sh tooling/org-drift.sh --repo <name> --commit <sha>"
+          sh tooling/org-drift.sh --repo <name> --commit <sha>
+
+        If they are genuinely accounted for - history from before this repo had
+        branch protection, or a rewrite that lost the association - record them
+        in .preflight-accepted-history (one \"<sha> <date> <reason>\" per line),
+        through a pull request, and this check will pass."
     else
       ok "$remote_main: no unreviewed-looking commits since $(git rev-parse --short "$start" 2>/dev/null || echo "$start")"
     fi
