@@ -63,6 +63,25 @@ Agents must **stop** when preflight fails; the exact wording for a repo's
 `CLAUDE.md`, and the `~/.claude/settings.json` SessionStart snippet that runs it
 automatically, are in [docs/GOVERNANCE.md](../docs/GOVERNANCE.md).
 
+### Accepted history
+
+Some repositories carry commits that predate their branch protection, or lost the
+association with their pull request in a history rewrite. Those are permanently
+flagged by the fourth check, which turns a useful signal into background noise.
+
+Record them in a `.preflight-accepted-history` file at the root of that
+repository, one per line:
+
+```
+fa3d550 2026-09-03 Direct push before branch protection was enabled 2026-09-10
+```
+
+Blank lines and `#` comments are ignored; short or full hashes both work. The
+file lives in the repository, not in anyone's home directory, so adding a line is
+a reviewed pull request that stays visible to everyone afterwards. Confirm each
+commit with `org-drift.sh` first, and never add a line for a fresh direct push -
+fix that instead.
+
 ## Push guard - a direct push reported in minutes
 
 Add to a repository as `.github/workflows/push-guard.yml`:
