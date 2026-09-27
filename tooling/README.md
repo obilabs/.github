@@ -44,7 +44,11 @@ curl -fsSL https://raw.githubusercontent.com/obilabs/.github/main/tooling/prefli
 ```
 
 Exits `0` when it is safe to work here, `1` with a plain explanation of what to
-fix, `2` when it could not run. It checks that the ObiLabs hooks are active in
+fix, `2` when it could not run. Two cases are deliberately **notes, not failures**:
+a directory that is not a repository at all (a workspace root holding several
+clones), and a clean checkout resting on `main` with nothing ahead of the remote,
+which is what a freshly pulled clone looks like. A `main` with uncommitted changes
+or unpushed commits still fails - that is the state this check exists for. It checks that the ObiLabs hooks are active in
 this repository, that `user.email` is the noreply address, that the checkout is
 not on `main`, and that remote `main` has no commits whose subject fails to name
 a pull request since the last tag (or the merge-base).
