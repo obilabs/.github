@@ -53,8 +53,12 @@ SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || SELF_DIR=''
 
 cd "$DIR" 2>/dev/null || { echo "preflight: no such directory: $DIR" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
-  echo "preflight: $(pwd) is not a git work tree" >&2
-  exit 2
+  # Not a repository at all - a workspace root holding several clones, say.
+  # There is nothing here to get wrong, so this is information, not a failure:
+  # exiting non-zero would make a session-start hook shout about a directory
+  # that was never going to be committed from.
+  [ "$QUIET" -eq 1 ] || echo "preflight: $(pwd) is not a git work tree - nothing to check here"
+  exit 0
 }
 
 [ "$QUIET" -eq 1 ] || echo "preflight: $(git rev-parse --show-toplevel)"
@@ -143,10 +147,22 @@ esac
 branch=$(git symbolic-ref --short -q HEAD 2>/dev/null || echo 'HEAD')
 case $branch in
   main | master)
-    fail "you are on '$branch'. Work never starts here: this harness syncs local
-        main to origin, so a commit on main can reach GitHub with no review.
-        Start a branch first:
+    # Resting on main with nothing staged, nothing modified and nothing ahead of
+    # the remote is the normal state of a freshly pulled clone. Saying FAILED
+    # there trains everyone to ignore the word. A dirty or ahead-of-remote main
+    # is the real thing this check exists for, and still fails.
+    dirty=$(git status --porcelain 2>/dev/null | head -1)
+    ahead=$(git rev-list --count "@{upstream}..HEAD" 2>/dev/null || echo 0)
+    if [ -z "$dirty" ] && [ "$ahead" = 0 ]; then
+      note "resting on '$branch' with a clean tree and nothing ahead of the remote.
+        Fine for reading; start a branch before you change anything:
           git switch -c <type>/<short-description>"
+    else
+      fail "you are on '$branch' with work in progress${dirty:+ (uncommitted changes)}$([ "$ahead" != 0 ] && printf ' (%s commit(s) ahead of the remote)' "$ahead").
+        This harness syncs local main to origin, so a commit on main can reach
+        GitHub with no review. Move the work onto a branch:
+          git switch -c <type>/<short-description>"
+    fi
     ;;
   HEAD)
     note "detached HEAD - no branch to check. Create one before committing."
