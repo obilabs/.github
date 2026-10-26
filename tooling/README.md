@@ -118,14 +118,14 @@ reports - it cannot prevent.
 
 ```sh
 sh tooling/apply-protection.sh <repo>... [--dry-run] [--require-check auto]
-sh tooling/apply-protection.sh --all [--private-only] [--dry-run]
+sh tooling/apply-protection.sh --all [--private-only] [--dry-run] [--org NAME]
 ```
 
-Calls `new-repo.sh --require-existing --no-clone` per repository (so the
-settings have one implementation, and nothing is ever created), then reads the
-protection back independently and prints a table of what GitHub actually stored
-and which repositories the plan refused. Exits `1` if any requested repository
-is unprotected afterwards.
+Calls `new-repo.sh --require-existing --no-clone --org <org>` per repository (so
+the settings have one implementation, and nothing is ever created), then reads
+the protection back independently and prints a table of what GitHub actually
+stored and which repositories the plan refused. Exits `1` if any requested
+repository is unprotected afterwards.
 
 `--require-check auto` requires the hygiene check on `main`, but only in repos
 where that check has actually reported - requiring a check the repo never runs
@@ -139,6 +139,8 @@ in [docs/GOVERNANCE.md](../docs/GOVERNANCE.md).
 ```sh
 sh tooling/new-repo.sh <repo-name> <public|private> [--dry-run] [--no-clone]
                        [--require-existing] [--require-check CONTEXT]...
+                       [--org NAME] [--template OWNER/REPO]
+                       [--commit-name NAME] [--commit-email ADDRESS]
 ```
 
 (`--require-existing` refuses to create anything, and `--require-check` adds a
@@ -168,8 +170,53 @@ pre-push hook is then the only guard, and **continues** - refusing to create the
 repo would not change the plan.
 
 `--dry-run` prints every command it would run and changes nothing; it still does
-the read-only checks (auth, scopes, whether the repo already exists) so the dry
-run takes the same branch a real run would.
+the read-only checks (auth, scopes, whether the repo already exists, whether the
+template exists) so the dry run takes the same branch a real run would.
+
+### Another organisation
+
+Four values used to be fixed at the top of the script. Each is now a flag whose
+default is the value that was there, so every existing invocation behaves
+identically:
+
+| Flag | Default |
+|---|---|
+| `--org NAME` | `obilabs` |
+| `--template OWNER/REPO` | `<org>/repo-template` |
+| `--commit-name NAME` | `Michael Agu` |
+| `--commit-email ADDRESS` | `36439190+openmoto@users.noreply.github.com` |
+
+`--org` is spelled the same way as in `apply-protection.sh` and `org-drift.sh`,
+and `apply-protection.sh` now passes its own `--org` through, so a sweep works in
+any organisation too.
+
+**The template follows the organisation, not ObiLabs.** `--org studio23ng` looks
+for `studio23ng/repo-template`, because the template is not generic: its
+`SECURITY.md` names a reporting route and its README footer carries ObiLabs'
+AI-assisted development disclosure. Seeding another company's repository with
+those silently would be wrong. If a missing template is the only thing in the
+way, the script says so by name and stops before creating anything; reusing this
+one is then an explicit choice:
+
+```sh
+sh tooling/new-repo.sh spotter private --org studio23ng --dry-run
+# new-repo: template 'studio23ng/repo-template' does not exist ...
+
+sh tooling/new-repo.sh spotter private --org studio23ng \
+  --template obilabs/repo-template --dry-run
+```
+
+`--commit-email` must be a GitHub **noreply** address. Anything else is refused:
+keeping a personal webmail address out of permanent commit metadata is the first
+rule in the policy table above, and this script is not the place to make an
+exception to it.
+
+`studio23ng` is on the Free plan with private repositories, so branch protection
+there is plan-gated exactly as it is for ObiLabs' private repos: GitHub answers
+*"Upgrade to GitHub Pro"* (as a 403 or a 404 - both are how it reports "not on
+your plan"), the script prints that reply under a **SKIPPED** heading with the
+warning that the local pre-push hook is then the only guard, finishes the
+remaining steps, and exits `0`.
 
 ## Install the local hooks
 

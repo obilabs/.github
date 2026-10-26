@@ -428,7 +428,9 @@ applied and what was skipped, and lists what still has to be clicked by hand.
 
 On a private repo it prints a plain warning that protection is unavailable on
 this plan and that the local pre-push hook is the only guard, and continues -
-refusing to create the repo would not make the plan any different.
+refusing to create the repo would not make the plan any different. That is a
+**SKIPPED** line in the summary and an exit code of `0`, not a failure and not a
+silent success.
 
 `sh tooling/apply-protection.sh <repo>...` or `--all` does the same for
 repositories that **already exist**. It does not create anything and never
@@ -447,6 +449,34 @@ sh tooling/apply-protection.sh web mtp --require-check auto
 where that check has actually reported on the default branch - requiring a check
 a repository never runs leaves every pull request stuck on "Expected" forever.
 A repo with no hygiene run is reported, not guessed at.
+
+### A second organisation
+
+The four values that used to be fixed at the top of `new-repo.sh` are flags, each
+defaulting to what was there, so nothing about an ObiLabs run changes:
+
+```sh
+sh tooling/new-repo.sh <name> <public|private> [--org NAME]
+    [--template OWNER/REPO] [--commit-name NAME] [--commit-email ADDRESS]
+```
+
+`--org` is the same spelling `apply-protection.sh` and `org-drift.sh` already
+use, and `apply-protection.sh` passes its own `--org` down, so one organisation
+name reaches every setting.
+
+The **template follows the organisation**: `--org studio23ng` looks for
+`studio23ng/repo-template`. The template is not generic - it carries a
+`SECURITY.md` reporting route and ObiLabs' AI-disclosure README footer - so
+another company gets its own unless `--template obilabs/repo-template` says
+otherwise. A missing template stops the run by name before anything is created.
+
+`--commit-email` is refused unless it is a GitHub noreply address. The layers
+above exist to keep personal webmail out of permanent commit metadata; the setup
+script does not get to opt out of them.
+
+This matters beyond convenience: these documents are public and meant to be
+usable by someone else's organisation. A script that only its author can run
+would not be.
 
 See `tooling/README.md` for the full interface.
 
