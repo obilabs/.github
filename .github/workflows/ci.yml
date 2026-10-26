@@ -156,6 +156,19 @@ jobs:
           echo "$out" | grep -q 'uncommitted changes' || { echo "FAIL dirty main not named as such"; exit 1; }
           echo "ok   dirty main still fails"
 
+          # --- a directory that is not a repository: a note, and exit 0 -------
+          # #7's other change, which had no test at all. A plain directory is
+          # not a mistake to report - you may simply not be in a clone yet -
+          # so this must stay exit 0 and must not be mistaken for a pass of
+          # checks it never ran.
+          mkdir -p "$root/not-a-repo"
+          rc=0
+          out=$(sh "$PWD/tooling/preflight.sh" --dir "$root/not-a-repo" --no-fetch 2>&1) || rc=$?
+          echo "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL a non-repository directory should exit 0, got $rc"; exit 1; }
+          echo "$out" | grep -q 'not a git work tree' || { echo "FAIL non-repo not explained"; exit 1; }
+          echo "ok   non-repository directory"
+
           # --- good: hooks installed, noreply identity, feature branch --------
           sh tooling/git-hooks/install.sh >/dev/null
           git init -q -b main "$root/good"
