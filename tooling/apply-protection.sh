@@ -12,7 +12,8 @@
 #                      discover the check names already running on the default
 #                      branch and require the hygiene one(s). A repo where none
 #                      is found is reported, not guessed at.
-#   --org NAME         default: obilabs
+#   --org NAME         default: obilabs. Passed through to new-repo.sh, so a
+#                      sweep works the same way in any organisation.
 #
 # It does NOT create repositories and it never changes visibility: it calls
 # tooling/new-repo.sh --require-existing --no-clone per repo, so protection,
@@ -137,7 +138,7 @@ for repo in $REPOS; do
     fi
   fi
 
-  set -- "$repo" "$vis" --require-existing --no-clone
+  set -- "$repo" "$vis" --require-existing --no-clone --org "$ORG"
   [ "$DRY_RUN" -eq 1 ] && set -- "$@" --dry-run
   while IFS= read -r c; do
     [ -n "$c" ] || continue
