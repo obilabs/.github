@@ -131,9 +131,43 @@ jobs:
           out=$(sh "$PWD/tooling/preflight.sh" --dir "$root/bad" --no-fetch 2>&1) || rc=$?
           echo "$out"
           [ "$rc" -eq 1 ] || { echo "FAIL bad checkout should exit 1, got $rc"; exit 1; }
-          echo "$out" | grep -q "you are on 'main'" || { echo "FAIL no branch complaint"; exit 1; }
+          # A CLEAN checkout resting on main is a note, not a failure (#7) - this
+          # fixture is clean, so assert the note. The old assertion here looked
+          # for the failure wording and became unsatisfiable when #7 landed,
+          # which is why this job went red on main on 2026-09-27 and stayed red.
+          echo "$out" | grep -q "resting on 'main'" || { echo "FAIL no clean-main note"; exit 1; }
           echo "$out" | grep -q 'not a GitHub noreply address' || { echo "FAIL no identity complaint"; exit 1; }
           echo "$out" | grep -q 'hooks are not installed' || { echo "FAIL no hooks complaint"; exit 1; }
+
+          # --- dirty main: the case the branch check actually exists for ------
+          # #7 narrowed the check to work-in-progress on main. Nothing covered
+          # that narrower case afterwards, so losing it entirely would have gone
+          # unnoticed too. This is the assertion the job was meant to make.
+          git init -q -b main "$root/dirty-main"
+          git -C "$root/dirty-main" config user.email 36439190+openmoto@users.noreply.github.com
+          git -C "$root/dirty-main" config user.name 'Michael Agu'
+          : > "$root/dirty-main/work-in-progress.txt"
+          git -C "$root/dirty-main" add work-in-progress.txt
+          rc=0
+          out=$(sh "$PWD/tooling/preflight.sh" --dir "$root/dirty-main" --no-fetch 2>&1) || rc=$?
+          echo "$out"
+          [ "$rc" -eq 1 ] || { echo "FAIL dirty main should exit 1, got $rc"; exit 1; }
+          echo "$out" | grep -q "you are on 'main'" || { echo "FAIL no branch complaint on dirty main"; exit 1; }
+          echo "$out" | grep -q 'uncommitted changes' || { echo "FAIL dirty main not named as such"; exit 1; }
+          echo "ok   dirty main still fails"
+
+          # --- a directory that is not a repository: a note, and exit 0 -------
+          # #7's other change, which had no test at all. A plain directory is
+          # not a mistake to report - you may simply not be in a clone yet -
+          # so this must stay exit 0 and must not be mistaken for a pass of
+          # checks it never ran.
+          mkdir -p "$root/not-a-repo"
+          rc=0
+          out=$(sh "$PWD/tooling/preflight.sh" --dir "$root/not-a-repo" --no-fetch 2>&1) || rc=$?
+          echo "$out"
+          [ "$rc" -eq 0 ] || { echo "FAIL a non-repository directory should exit 0, got $rc"; exit 1; }
+          echo "$out" | grep -q 'not a git work tree' || { echo "FAIL non-repo not explained"; exit 1; }
+          echo "ok   non-repository directory"
 
           # --- good: hooks installed, noreply identity, feature branch --------
           sh tooling/git-hooks/install.sh >/dev/null
