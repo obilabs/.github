@@ -86,6 +86,13 @@ jobs:
           check "name with a space"         1 "bad name" private
           check "reserved name .git"        1 .git private
           check "unknown option"            1 widget public --bogus
+          check "--org with no value"       1 widget public --org
+          check "bad org name"              1 widget public --org "not an org"
+          check "--template with no value"  1 widget public --template
+          check "bad template"              1 widget public --template nope
+          check "--commit-email with no value" 1 widget public --commit-email
+          check "webmail commit email"      1 widget public --commit-email dev@gmail.example
+          check "empty commit name"         1 widget public --commit-name ""
           exit "$fail"
       - name: Dry run touches no GitHub API
         env:
@@ -102,6 +109,20 @@ jobs:
           fi
           grep -q 'would create obilabs/ci-dry-run-widget' out.txt
           echo "Dry run is inert."
+      - name: Another organisation is a flag, not an edit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # --org changes every target; --template is needed because the default
+          # follows the org and example-org has no repo-template.
+          sh tooling/new-repo.sh ci-dry-run-widget private --dry-run --no-clone \
+            --org example-org --template obilabs/repo-template >other.txt 2>&1 || true
+          cat other.txt
+          grep -q 'would create example-org/ci-dry-run-widget' other.txt
+          grep -q 'repos/example-org/ci-dry-run-widget/branches/main/protection' other.txt
+          ! grep -q 'obilabs/ci-dry-run-widget' other.txt
+          echo "Dry run targets example-org only."
 
   preflight:
     name: preflight.sh (throwaway repos)

@@ -1,9 +1,16 @@
 #!/bin/sh
-# Create a new ObiLabs repository from obilabs/repo-template and apply every
+# Create a new repository from the organisation's template and apply every
 # governance setting the plan allows.
 #
 #   sh tooling/new-repo.sh <repo-name> <public|private> [--dry-run] [--no-clone]
 #                          [--require-existing] [--require-check CONTEXT]...
+#                          [--org NAME] [--template OWNER/REPO]
+#                          [--commit-name NAME] [--commit-email ADDRESS]
+#
+# Defaults are the ObiLabs ones, so every existing invocation is unchanged. The
+# template defaults to <org>/repo-template, not obilabs/repo-template: the
+# template carries org-specific content (SECURITY.md reporting route, the README
+# footer), so another organisation gets its own unless --template says otherwise.
 #
 # Idempotent: re-running against an existing repository re-applies the settings
 # and reports them instead of failing. Settings GitHub gates behind a paid plan
@@ -16,9 +23,10 @@
 set -eu
 
 ORG=obilabs
-TEMPLATE=obilabs/repo-template
-NOREPLY_EMAIL=36439190+openmoto@users.noreply.github.com
-NOREPLY_NAME='Michael Agu'
+# Empty means "<org>/repo-template", resolved once the arguments are parsed.
+TEMPLATE=''
+COMMIT_EMAIL=36439190+openmoto@users.noreply.github.com
+COMMIT_NAME='Michael Agu'
 # The literal '~' is deliberate: install.sh stores a ~-relative core.hooksPath
 # so the global git config carries no username-bearing absolute path.
 # shellcheck disable=SC2088
@@ -39,6 +47,8 @@ usage() {
   cat >&2 <<EOF
 usage: sh tooling/new-repo.sh <repo-name> <public|private> [--dry-run] [--no-clone]
                               [--require-existing] [--require-check CONTEXT]...
+                              [--org NAME] [--template OWNER/REPO]
+                              [--commit-name NAME] [--commit-email ADDRESS]
 
   <repo-name>   1-64 chars, letters/digits/._- , must start with a letter or digit
   public|private
@@ -49,6 +59,20 @@ usage: sh tooling/new-repo.sh <repo-name> <public|private> [--dry-run] [--no-clo
   --require-check C  require status check "C" on main; repeat for several.
                      Only pass checks the repo really runs, or pull requests
                      will wait forever.
+  --org NAME         organisation to create the repository in.
+                     Default: obilabs
+  --template OWNER/REPO
+                     template repository to create from.
+                     Default: <org>/repo-template, so another organisation gets
+                     its own template rather than ObiLabs' SECURITY.md and
+                     README footer. Pass obilabs/repo-template to reuse this one.
+  --commit-name NAME commit identity set in the clone.
+                     Default: Michael Agu
+  --commit-email ADDRESS
+                     commit identity set in the clone. Must be a GitHub noreply
+                     address - a personal webmail address in public commit
+                     metadata is what this tooling exists to prevent.
+                     Default: 36439190+openmoto@users.noreply.github.com
 EOF
   exit 2
 }
@@ -59,6 +83,22 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1; shift ;;
     --no-clone) CLONE=0; shift ;;
     --require-existing) REQUIRE_EXISTING=1; shift ;;
+    --org)
+      [ $# -ge 2 ] || die "--org needs an organisation name"
+      ORG=$2; shift 2
+      ;;
+    --template)
+      [ $# -ge 2 ] || die "--template needs an OWNER/REPO value"
+      TEMPLATE=$2; shift 2
+      ;;
+    --commit-name)
+      [ $# -ge 2 ] || die "--commit-name needs a value"
+      COMMIT_NAME=$2; shift 2
+      ;;
+    --commit-email)
+      [ $# -ge 2 ] || die "--commit-email needs a value"
+      COMMIT_EMAIL=$2; shift 2
+      ;;
     --require-check)
       [ $# -ge 2 ] || die "--require-check needs a check name"
       REQUIRE_CHECKS="$REQUIRE_CHECKS$2
@@ -78,6 +118,25 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$NAME" ] && [ -n "$VISIBILITY" ] || usage
+
+# The template follows the organisation unless the caller overrode it.
+[ -n "$TEMPLATE" ] || TEMPLATE="$ORG/repo-template"
+
+if ! printf '%s' "$ORG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]{0,38}$'; then
+  die "invalid organisation '$ORG': use 1-39 chars of [A-Za-z0-9-], starting with a letter or digit"
+fi
+
+if ! printf '%s' "$TEMPLATE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'; then
+  die "invalid template '$TEMPLATE': use OWNER/REPO"
+fi
+
+# This tooling exists to keep personal addresses out of permanent commit
+# metadata, so it will not set one itself.
+case $COMMIT_EMAIL in
+  *@users.noreply.github.com) ;;
+  *) die "--commit-email must be a GitHub noreply address (<id>+<user>@users.noreply.github.com), got '$COMMIT_EMAIL'" ;;
+esac
+[ -n "$COMMIT_NAME" ] || die "--commit-name must not be empty"
 
 case $VISIBILITY in
   public | private) ;;
@@ -213,6 +272,14 @@ elif [ "$REQUIRE_EXISTING" -eq 1 ]; then
   die "$REPO does not exist, and --require-existing was given. This mode only
   re-applies settings to repositories that already exist; it never creates one."
 else
+  # Read-only, so it runs in --dry-run too: a missing template is the most
+  # likely failure when --org points somewhere new, and it should be named
+  # before anything is created rather than surfacing as a raw gh error.
+  if ! gh repo view "$TEMPLATE" >/dev/null 2>&1; then
+    die "template '$TEMPLATE' does not exist, or this token cannot see it.
+  Create it in '$ORG', or name another one:
+      sh tooling/new-repo.sh $NAME $VISIBILITY --org $ORG --template obilabs/repo-template"
+  fi
   run "create" gh repo create "$REPO" \
     --template "$TEMPLATE" \
     --"$VISIBILITY" \
@@ -314,8 +381,12 @@ EOF
 elif plan_gated; then
   cat <<EOF
   SKIPPED - GitHub gates branch protection on private repositories behind a paid
-  plan, and this organisation is on the Free plan. GitHub's reply:
+  plan, and '$ORG' is on the Free plan. GitHub's reply (a 403 or 404 with this
+  message is how GitHub says "not on your plan"):
     $(printf '%s' "$GH_API_OUT" | head -c 200)
+
+  This is a skip, not a failure: the remaining steps still run and this script
+  still exits 0, because refusing to finish would not change the plan.
 
   WARNING: nothing on the server will stop a direct push to main in this repo.
   The ONLY guard is the local pre-push hook, on machines where it is installed:
@@ -401,20 +472,20 @@ if [ "$CLONE" -eq 0 ]; then
   note_skipped "local clone (--no-clone)"
 elif [ "$DRY_RUN" -eq 1 ]; then
   printf '  [dry-run] gh repo clone %s\n' "$REPO"
-  printf '  [dry-run] git -C %s config user.name "%s"\n' "$NAME" "$NOREPLY_NAME"
-  printf '  [dry-run] git -C %s config user.email %s\n' "$NAME" "$NOREPLY_EMAIL"
+  printf '  [dry-run] git -C %s config user.name "%s"\n' "$NAME" "$COMMIT_NAME"
+  printf '  [dry-run] git -C %s config user.email %s\n' "$NAME" "$COMMIT_EMAIL"
   printf '  [dry-run] check core.hooksPath == %s\n' "$HOOKS_PATH"
 elif [ -e "$NAME" ]; then
   echo "  '$NAME' already exists in $(pwd) - not cloning over it."
   note_skipped "local clone ('$NAME' already exists here)"
 else
   if gh repo clone "$REPO" "$NAME" -- --quiet; then
-    git -C "$NAME" config user.name "$NOREPLY_NAME"
-    git -C "$NAME" config user.email "$NOREPLY_EMAIL"
+    git -C "$NAME" config user.name "$COMMIT_NAME"
+    git -C "$NAME" config user.email "$COMMIT_EMAIL"
     echo "  Cloned to ./$NAME"
     echo "  user.name  = $(git -C "$NAME" config user.name)"
     echo "  user.email = $(git -C "$NAME" config user.email)"
-    note_applied "clone ./$NAME with the noreply commit identity"
+    note_applied "clone ./$NAME with the noreply commit identity ($COMMIT_EMAIL)"
 
     local_hp=$(git -C "$NAME" config --local --get core.hooksPath || true)
     global_hp=$(git config --global --get core.hooksPath || true)
